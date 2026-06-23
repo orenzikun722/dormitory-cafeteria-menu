@@ -1,0 +1,118 @@
+# google colabのGCP_SERVICE_ACCOUNTに無理矢理service_account.jsonを貼り付けています
+# 舞鶴高専公式ホームページの寮 => 食堂関係のリンクをすべて取得しターゲット月に当てはまるリンクを取得します
+# 一度メモリに保存 => pdfplumberにそのまま流すことで解析して保存します
+# この仕組みを使うことで下の設定を変えて実行するだけで保存されます
+
+
+#メイン設定
+month = 6
+year = 2026
+
+
+
+import requests
+from bs4 import BeautifulSoup
+import io
+import pdfplumber
+import gspread
+from google.oauth2.service_account import Credentials
+import datetime
+import calendar
+from google.colab import userdata
+
+service_account_str = userdata.get('GCP_SERVICE_ACCOUNT')
+json_path = '/content/service_account.json'
+with open(json_path, 'w') as f:
+    f.write(service_account_str)
+
+dormitory_url = "https://www.maizuru-ct.ac.jp/campuslife/dormitory/"
+notice_url = ""
+response = requests.get(dormitory_url)
+soup = BeautifulSoup(response.content, "html.parser")
+for link in soup.select("#tab3")[0].find_all("li"):
+  title = link.select('.entrytitle')[0].get_text()
+  if "学寮食堂献立表" in title:
+    if str(month) + "月" in title:
+      notice_url = link.find('a').attrs['href']
+if notice_url != "":
+  response = requests.get(notice_url)
+  soup = BeautifulSoup(response.content, "html.parser")
+  pdf_url = soup.select('.overflow')[0].find('a').attrs['href']
+  response = requests.get(pdf_url)
+  if response.status_code == 200:
+    with pdfplumber.open(io.BytesIO(response.content)) as pdf:
+      week = ["月","火","水","木","金","土","日"]
+      days = calendar.monthrange(year, month)[1]
+      for day in range(1, days + 1):
+        date = datetime.datetime.strptime(
+          "2026年"+str(month)+"月"+str(day)+"日",
+          "%Y年%m月%d日"
+        )
+        target_date = "2026年"+str(month)+"月"+str(day)+"日("+week[date.weekday()]+")"
+        for page in pdf.pages:
+          table = page.extract_table()
+          if not table:
+            continue
+          headers = table[0]
+          try:
+            date_col = headers.index(target_date)
+          except ValueError:
+            continue
+          filtered_rows = []
+          for row_idx, row in enumerate(table):
+            if row_idx == 0:
+              continue
+            item = row[date_col]
+            if item is None:
+              continue
+            item = item.strip()
+            if item:
+              if "\nA\n" in item:
+                item = item.replace("\nA\n", "")
+                item = "[ Ａ ]\n" + item
+              else:
+                item = item.replace("A", "[ Ａ ]\n")
+              if "\nB\n" in item:
+                item = item.replace("\nB\n", "")
+                item = "[ Ｂ ]\n" + item
+              else:
+                item = item.replace("B", "[ Ｂ ]\n")
+                filtered_rows.append(item)
+            energy_indices = [
+              i for i, item in enumerate(filtered_rows) if "ｴﾈﾙｷﾞｰ" in item
+            ]
+            if len(energy_indices) >= 3:
+              breakfast_list = filtered_rows[0 : energy_indices[0]]
+              lunch_list = filtered_rows[energy_indices[0] + 1 : energy_indices[1]]
+              dinner_list = filtered_rows[energy_indices[1] + 1 : energy_indices[2]]
+              breakfast = "\n".join(breakfast_list)
+              lunch = "\n".join(lunch_list)
+              dinner = "\n".join(dinner_list)
+              if breakfast != "" and lunch != "" and dinner != "":
+                scopes = ["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
+                creds = Credentials.from_service_account_file(
+                  json_path,
+                  scopes=scopes
+                )
+                client = gspread.authorize(creds)
+                sheet = client.open("寮食管理").sheet1
+                before_data = sheet.find(target_date)
+                if before_data == None:
+                  sheet.append_row([target_date, breakfast, lunch, dinner])
+                else:
+                  sheet.update_cell(before_data.row, before_data.col+1, breakfast)
+                  sheet.update_cell(before_data.row, before_data.col+2, lunch)
+                  sheet.update_cell(before_data.row, before_data.col+3, dinner)
+                  print(target_date+"の記入完了")
+              else:
+                if breakfast == "":
+                  print(target_date+": 朝食が取得できていません")
+                if lunch == "":
+                  print(target_date+": 昼食が取得できていません")
+                if dinner == "":
+                  print(target_date+": 夕食が取得できていません")
+
+  else:
+    print(f"PDFの取得に失敗しました。ステータスコード: {response.status_code}")
+else:
+  print(f"最新のお知らせ5件から目標の月のpdfを取得できませんでした")
